@@ -1,0 +1,7 @@
+*.exe
+*.o
+*.d
+*.csv
+getspotdata/__pycache__
+getspotdata/build
+getspotdata/getspotdata.spec
