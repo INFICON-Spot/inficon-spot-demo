@@ -25,7 +25,7 @@ Pins 8, 9 and 10 of the Spot are left unconnected.
 
 # Github
 The project is available on github at
-https://github.com/criesch/inficon-spot-demo
+https://github.com/INFICON-Spot/inficon-spot-demo
 
 # Bugs
 Please report bugs to Christian Riesch <christian.riesch@inficon.com>
