@@ -1,16 +1,18 @@
 /*
  * Spot Demonstrator Kit
  *
- * Copyright (c) 2018 INFICON Ltd.
+ * Copyright (c) 2018-2021 INFICON Ltd.
  *
  */
 
 // spot demonstrator firmware version
-#define FWVERSION "01.05.00"
+#define FWVERSION "01.07.00"
 
 #include <Adafruit_RGBLCDShield.h>
 
 #include <SPI.h>
+
+#include "crc.h"
 
 // INFICON Spot sensor
 #include <inficon_spot.h>
@@ -37,6 +39,21 @@ const int SSPin = 10; // slave(chip) select, input (low true)
 const int RDYPin = 3; //Ready signal, out (low true)
 
 InficonSpot spot = InficonSpot(SSPin, RDYPin, 4000000UL);
+
+enum CrcState {
+  CRC_OK,
+  CRC_BAD,
+  CRC_NOTCHECKED,
+};
+
+// crc32 over the spot program memory
+struct CrcInfo {
+  crc_t otpCrc;
+  crc_t sramCrc;
+  CrcState otpGood, sramGood;
+};
+
+CrcInfo crcInfo;
 
 // base class for screens on the LCD
 class Screen {
@@ -197,6 +214,48 @@ void LabelDataScreen::display()
   lcd.print((spot.*_readLabelFunction)().substring(0, 16));
 }
 
+class CrcScreen : public Screen {
+  public:
+    virtual void display();
+};
+
+void CrcScreen::display()
+{
+  char buf[17];
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  sprintf(buf, "OTP:%08lX", crcInfo.otpCrc);
+  lcd.print(buf);
+  lcd.setCursor(13, 0);
+  switch(crcInfo.otpGood) {
+    case CRC_OK:
+      lcd.print("ok");
+      break;
+    case CRC_BAD:
+      lcd.print("bad");
+      break;
+    default:
+      lcd.print("n/a");
+      break;
+  }
+  lcd.setCursor(0, 1);
+  sprintf(buf, "RAM:%08lX", crcInfo.sramCrc);
+  lcd.print(buf);
+  lcd.setCursor(13, 1);
+  switch(crcInfo.sramGood) {
+    case CRC_OK:
+      lcd.print("ok");
+      break;
+    case CRC_BAD:
+      lcd.print("bad");
+      break;
+    default:
+      lcd.print("n/a");
+      break;
+  }
+}
+
 // screen displaying combined pressure and temperature
 class SwVersionScreen : public Screen {
   public:
@@ -224,8 +283,9 @@ LabelDataScreen readFs2Screen("Label: FS p2", &InficonSpot::readFullscale2);
 LabelDataScreen readTypeScreen("Label: Type", &InficonSpot::readType);
 LabelDataScreen readSpeedScreen("Label: Speed", &InficonSpot::readSpeed);
 SwVersionScreen swVersionString;
+CrcScreen crcScreen;
 
-const int NUMSCREENS = 12;
+const int NUMSCREENS = 13;
 Screen *screens[NUMSCREENS] = {
     &presTempScreen, &p1p2Screen,
     &statusScreen,
@@ -238,6 +298,7 @@ Screen *screens[NUMSCREENS] = {
     &readTypeScreen,
     &readSpeedScreen,
     &swVersionString,
+    &crcScreen,
 };
 int displayscreen = 0;
 
@@ -298,6 +359,53 @@ void setup() {
   // Initialize Spot sensor
   spot.begin();
   Serial.println ("#working");
+
+  // stop the sensor before reading
+  spot.writeRegister(20, 0);
+
+  // calculate OTP crc32
+  crc_t otp_crc32, storedCrc;
+  otp_crc32 = crc_init();
+  otp_crc32 = crc_loop(otp_crc32, 0, 3819, true);
+  otp_crc32 = crc_loop(otp_crc32, 3824, 4094, true);
+  otp_crc32 = crc_finalize(otp_crc32);
+  storedCrc = spot.readOtpCrc();
+  Serial.println("#OTP: calculated CRC is " + String(otp_crc32, HEX) + ", stored in mem " +
+    String(storedCrc, HEX));
+  crcInfo.otpCrc = otp_crc32;
+  if (storedCrc == 0xffffffff) {
+    crcInfo.otpGood = CRC_NOTCHECKED;
+  } else {
+    if (otp_crc32 == storedCrc) {
+      crcInfo.otpGood = CRC_OK;
+    } else {
+      crcInfo.otpGood = CRC_BAD;
+    }
+  }
+
+  // calculate SRAM CRC
+  crc_t sram_crc32;
+  sram_crc32 = crc_init();
+  sram_crc32 = crc_loop(sram_crc32, 0, 3815, false);
+  sram_crc32 = crc_loop(sram_crc32, 3824, 4031, false);
+  sram_crc32 = crc_finalize(sram_crc32);
+  storedCrc = spot.readSramCrc();
+  Serial.println("#SRAM: calculated CRC is " + String(sram_crc32, HEX) + ", stored in mem " +
+    String(storedCrc, HEX));
+  crcInfo.sramCrc = sram_crc32;
+  if (storedCrc == 0xffffffff) {
+    crcInfo.sramGood = CRC_NOTCHECKED;
+  } else {
+    if (sram_crc32 == storedCrc) {
+      crcInfo.sramGood = CRC_OK;
+    } else {
+      crcInfo.sramGood = CRC_BAD;
+    }
+  }
+
+  // restart sensor
+  spot.resetSensor();
+  spot.writeRegister(20, 0);
 
   // install spot interrupt
   attachInterrupt(digitalPinToInterrupt(RDYPin), spotInterrupt, FALLING);
@@ -376,6 +484,25 @@ void setup() {
     Serial.println(String("#Pressure 1 fullscale: ") + String(p1fullscale, DEC) + String(" ") + String(p1unit));
     Serial.println(String("#Pressure 2 fullscale: ") + String(p2fullscale, DEC) + String(" ") + String(p2unit));
   }
+}
+
+crc_t crc_loop(crc_t crc, uint16_t start, uint16_t end, bool otp)
+{
+  uint8_t crcbuf[16];
+  uint16_t length = end - start + 1;
+  uint16_t address = start;
+  while (length) {
+    uint16_t readlen = (length < 16) ? length : 16;
+    if (otp) {
+      spot.readOTP(address, crcbuf, readlen);
+    } else {
+      spot.readMemory(address, crcbuf, readlen);
+    }
+    crc = crc_update(crc, crcbuf, readlen);
+    address += readlen;
+    length -= readlen;
+  }
+  return crc;
 }
 
 unsigned long lastresult = 0, lastkeyboardtime = 0;
