@@ -405,6 +405,9 @@ void setup() {
 
   // restart sensor
   spot.resetSensor();
+  delay(10);
+  spot.sendCommand(0x8a);
+  delay(10);
   spot.writeRegister(20, 0);
 
   // install spot interrupt
@@ -412,6 +415,8 @@ void setup() {
 
   // reset the Spot sensor
   spot.resetSensor();
+  delay(10);
+  spot.sendCommand(0x8a);
   delay(100);
 
   // read fullscales and units from the sensor
@@ -528,6 +533,10 @@ void loop() {
     Serial.println("#Timeout: Resetting Spot");
     results.locked = true;
     spot.resetSensor();
+    delay(10);
+    spot.sendCommand(0x8a);
+    delay(10);
+
     lastresult = millis(); // store the time of the last valid measurement
     results.mean_pressure = 0;
     results.mean_temperature = 0;
